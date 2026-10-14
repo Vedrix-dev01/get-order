@@ -1,0 +1,4 @@
+anthropic>=1.13
+pydantic>=2.6
+# optional: word-level captions from real (ad-libbed) footage
+# faster-whisper>=1.0

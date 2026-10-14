@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Content Agents</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 1l7 7-7 7-7-7z%27 fill=%27%234f46e5%27/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◆</span>
+      <span>Content Agents</span>
+      <span id="mode" class="badge">…</span>
+    </div>
+    <div class="topbar-actions">
+      <button id="libraryBtn" class="btn ghost">Angle library</button>
+      <button id="newRunBtn" class="btn primary">New run</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <h2 class="side-title">Runs</h2>
+      <ul id="runList" class="run-list"></ul>
+    </aside>
+
+    <main id="main" class="main">
+      <section class="empty" id="empty">
+        <h1>Five agents, one content workflow</h1>
+        <p>Give the researcher a few raw topic ideas. The agents find the trend angle, write the script,
+          wait for you to film, edit the video, write platform copy and queue drafts for your approval.</p>
+        <button class="btn primary" onclick="openNewRun()">Start a run</button>
+      </section>
+      <div id="run" hidden>
+        <div class="run-head">
+          <div>
+            <div class="eyebrow">Run <span id="runId"></span></div>
+            <h1 id="runTitle"></h1>
+          </div>
+          <span id="runStatus" class="status"></span>
+        </div>
+        <ol id="rail" class="rail"></ol>
+        <div id="banner"></div>
+        <div id="stages"></div>
+      </div>
+    </main>
+
+    <aside class="activity">
+      <h2 class="side-title">Activity</h2>
+      <ol id="feed" class="feed"></ol>
+    </aside>
+  </div>
+
+  <dialog id="newRunDialog" class="dialog">
+    <form method="dialog" id="newRunForm">
+      <h2>New run</h2>
+      <label for="topics">Raw topic ideas, one per line</label>
+      <textarea id="topics" rows="5">AI tools that save small businesses time on marketing
+Why most Instagram Reels flop in the first 3 seconds
+UGC vs polished brand videos</textarea>
+      <label class="check"><input type="checkbox" id="auto"> Auto-approve (skip the two checkpoints)</label>
+      <div class="dialog-actions">
+        <button value="cancel" class="btn ghost" formnovalidate>Cancel</button>
+        <button value="start" class="btn primary">Start agents</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="libraryDialog" class="dialog wide">
+    <h2>Content-angle library</h2>
+    <p class="muted">Every angle the researcher has produced, saved in the database. ★ = produced.</p>
+    <div id="libraryBody"></div>
+    <div class="dialog-actions"><button class="btn ghost" onclick="libraryDialog.close()">Close</button></div>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
