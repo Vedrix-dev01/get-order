@@ -302,10 +302,11 @@ def _render(src: Path, segments: list[Segment], ass_file: Path, out: Path, has_a
     else:
         parts.append(f"{frame}[base]")
         parts.append("[base][1:v]overlay=0:0:format=auto:eof_action=pass[v]")
-    script = out.parent / "edit.filtergraph"
-    script.write_text(";\n".join(parts), encoding="utf-8")
+    graph = ";".join(parts)
+    # Kept for debugging; passed inline because ffmpeg 8+ removed -filter_complex_script.
+    (out.parent / "edit.filtergraph").write_text(graph.replace(";", ";\n"), encoding="utf-8")
     maps = ["-map", "[v]"] + (["-map", "[a]", "-c:a", "aac", "-b:a", "160k"] if has_audio else ["-an"])
-    ffmpeg([*inputs, "-filter_complex_script", script.name, *maps,
+    ffmpeg([*inputs, "-filter_complex", graph, *maps,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart", out.name], cwd=out.parent)
 
