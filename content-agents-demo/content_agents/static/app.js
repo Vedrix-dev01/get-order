@@ -90,6 +90,7 @@ function renderEvents(events) {
     li.className = `ev ${ev.agent} ${ev.level}`;
     li.innerHTML = `<span class="ts">${esc(ev.ts.slice(11, 19))}</span><div class="who">${esc(ev.agent.replace("_", " "))}</div>${esc(ev.message)}`;
     feed.appendChild(li);
+    if (ev.level === "error") delete ui.slices.script; // re-enable the filming buttons
   }
   if (events.length) loadRuns();
 }

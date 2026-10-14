@@ -45,7 +45,8 @@ class VideoEditor(Agent):
 
         out = run_dir / "final_vertical.mp4"
         self.log(run, "Rendering 1080x1920: jump cuts, center crop, burned captions, loudness -14 LUFS…")
-        media.render_vertical(src, segments, ass_file, out, info["has_audio"], cards, hook)
+        renderer = media.render_vertical(src, segments, ass_file, out, info["has_audio"], cards, hook)
+        self.log(run, f"Captions burned in with {renderer}")
         thumb = run_dir / "thumbnail.jpg"
         media.thumbnail(out, thumb, at=min(1.0, kept / 2))
         final = media.probe(out)

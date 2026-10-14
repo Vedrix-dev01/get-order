@@ -195,6 +195,12 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     mode = f"live Claude ({pipeline.settings.model})" if pipeline.llm.mode == "live" else "demo mode (no API key)"
     print(f"Content agents dashboard: http://{host}:{port}  ·  {mode}")
     print(f"Drive inbox folder being watched: {pipeline.settings.inbox_dir}")
+    from shutil import which
+
+    from .media import available_filters
+    filters = available_filters()
+    voice = "ffmpeg flite" if "flite" in filters else ("macOS say" if which("say") else "none (upload a real clip)")
+    print(f"Captions: {'libass' if 'ass' in filters else 'Pillow'} · simulated-take voice: {voice}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

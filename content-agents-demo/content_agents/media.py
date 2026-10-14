@@ -264,9 +264,21 @@ def transcribe_words(path: Path) -> list[tuple[float, float, str]] | None:
 
 
 def render_vertical(src: Path, segments: list[Segment], ass_file: Path, out: Path, has_audio: bool,
-                    cards: list[Card], hook: str | None) -> None:
-    """Jump-cut to the speech segments, crop to 9:16, burn captions, normalize audio."""
-    use_ass = "ass" in available_filters()
+                    cards: list[Card], hook: str | None) -> str:
+    """Jump-cut to the speech segments, crop to 9:16, burn captions, normalize
+    audio. Returns the caption renderer used ("libass" or "pillow")."""
+    if "ass" in available_filters():
+        try:
+            _render(src, segments, ass_file, out, has_audio, cards, hook, use_ass=True)
+            return "libass"
+        except MediaError:
+            pass  # filter listed but unusable on this build: fall back below
+    _render(src, segments, ass_file, out, has_audio, cards, hook, use_ass=False)
+    return "pillow"
+
+
+def _render(src: Path, segments: list[Segment], ass_file: Path, out: Path, has_audio: bool,
+            cards: list[Card], hook: str | None, use_ass: bool) -> None:
     inputs = ["-i", str(src.resolve())]
     if not use_ass:
         playlist = render_caption_frames(cards, hook, out.parent / "_captions")
@@ -412,7 +424,8 @@ def synthesize_footage(sentences: list[str], out: Path, workdir: Path) -> Path:
     """
     filters = available_filters()
     use_flite = "flite" in filters
-    if not use_flite and not shutil.which("say"):
+    has_say = shutil.which("say") is not None
+    if not use_flite and not has_say:
         raise MediaError("No text-to-speech available to simulate a take (needs ffmpeg with flite, "
                          "or macOS). Use 'Upload a real clip' instead.")
     workdir.mkdir(parents=True, exist_ok=True)
@@ -422,12 +435,19 @@ def synthesize_footage(sentences: list[str], out: Path, workdir: Path) -> Path:
     for i, sentence in enumerate(sentences):
         (workdir / f"line{i}.txt").write_text(sentence, encoding="utf-8")
         if use_flite:
-            source = ["-f", "lavfi", "-i", f"flite=textfile=line{i}.txt:voice=slt"]
-        else:
-            subprocess.run(["say", "-o", f"line{i}.aiff", "-f", f"line{i}.txt"], cwd=workdir, check=True)
-            source = ["-i", f"line{i}.aiff"]
-        ffmpeg([*source, "-af", f"aresample=48000,volume={2.2 if use_flite else 1.0}", "-ac", "1",
-                f"line{i}.wav"], cwd=workdir)
+            try:
+                ffmpeg(["-f", "lavfi", "-i", f"flite=textfile=line{i}.txt:voice=slt",
+                        "-af", "aresample=48000,volume=2.2", "-ac", "1", f"line{i}.wav"], cwd=workdir)
+            except MediaError:
+                if not has_say:
+                    raise
+                use_flite = False  # flite listed but unusable: switch to macOS say
+        if not use_flite:
+            proc = subprocess.run(["say", "-o", f"line{i}.aiff", "-f", f"line{i}.txt"], cwd=workdir,
+                                  capture_output=True, text=True)
+            if proc.returncode != 0:
+                raise MediaError(f"macOS say failed: {proc.stderr.strip()}")
+            ffmpeg(["-i", f"line{i}.aiff", "-af", "aresample=48000", "-ac", "1", f"line{i}.wav"], cwd=workdir)
         inputs += ["-i", f"line{i}.wav"]
         pad = tail if i == len(sentences) - 1 else gaps[i % len(gaps)]
         delay = f"adelay={int(lead * 1000)}:all=1," if i == 0 else ""
