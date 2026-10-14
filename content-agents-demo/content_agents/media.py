@@ -4,7 +4,8 @@ Pipeline for one raw clip:
   1. detect silences          (ffmpeg silencedetect)
   2. keep only speech         (trim + concat = jump cuts)
   3. crop to 9:16, 1080x1920  (scale + center crop)
-  4. burn captions            (styled ASS subtitles via libass)
+  4. burn captions            (styled ASS subtitles via libass, or Pillow-drawn
+                               overlays on ffmpeg builds without libass)
   5. normalize loudness       (loudnorm to -14 LUFS, the short-form standard)
 """
 
@@ -12,8 +13,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 Segment = tuple[float, float]
@@ -35,6 +38,17 @@ def ffmpeg(args: list[str], cwd: Path | None = None) -> str:
         tail = "\n".join(proc.stderr.strip().splitlines()[-12:])
         raise MediaError(f"ffmpeg failed:\n{tail}")
     return proc.stderr
+
+
+@lru_cache(maxsize=1)
+def available_filters() -> frozenset[str]:
+    """Filters this ffmpeg build has. Slim builds (e.g. current Homebrew) lack
+    libass (ass), freetype (drawtext) and flite, so those steps have fallbacks.
+    CA_DISABLE_FILTERS=ass,flite simulates a slim build."""
+    proc = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True)
+    names = set(re.findall(r"^\s*[A-Z.|]{2,4}\s+(\w+)\s+\S+->\S+", proc.stdout, re.MULTILINE))
+    disabled = {f.strip() for f in os.environ.get("CA_DISABLE_FILTERS", "").split(",") if f.strip()}
+    return frozenset(names - disabled)
 
 
 def probe(path: Path) -> dict:
@@ -249,8 +263,14 @@ def transcribe_words(path: Path) -> list[tuple[float, float, str]] | None:
 # --- Render ------------------------------------------------------------------
 
 
-def render_vertical(src: Path, segments: list[Segment], ass_file: Path, out: Path, has_audio: bool) -> None:
+def render_vertical(src: Path, segments: list[Segment], ass_file: Path, out: Path, has_audio: bool,
+                    cards: list[Card], hook: str | None) -> None:
     """Jump-cut to the speech segments, crop to 9:16, burn captions, normalize audio."""
+    use_ass = "ass" in available_filters()
+    inputs = ["-i", str(src.resolve())]
+    if not use_ass:
+        playlist = render_caption_frames(cards, hook, out.parent / "_captions")
+        inputs += ["-f", "concat", "-safe", "0", "-i", str(playlist.resolve())]
     parts, labels = [], []
     for i, (a, b) in enumerate(segments):
         parts.append(f"[0:v]trim=start={a}:end={b},setpts=PTS-STARTPTS[v{i}]")
@@ -264,16 +284,115 @@ def render_vertical(src: Path, segments: list[Segment], ass_file: Path, out: Pat
         parts.append("[ac]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
     else:
         parts.append(f"{''.join(labels)}concat=n={n}:v=1:a=0[vc]")
-    parts.append(
-        f"[vc]fps=30,scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
-        f"crop={OUT_W}:{OUT_H},setsar=1,ass={ass_file.name}[v]"
-    )
+    frame = f"[vc]fps=30,scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,crop={OUT_W}:{OUT_H},setsar=1"
+    if use_ass:
+        parts.append(f"{frame},ass={ass_file.name}[v]")
+    else:
+        parts.append(f"{frame}[base]")
+        parts.append("[base][1:v]overlay=0:0:format=auto:eof_action=pass[v]")
     script = out.parent / "edit.filtergraph"
     script.write_text(";\n".join(parts), encoding="utf-8")
     maps = ["-map", "[v]"] + (["-map", "[a]", "-c:a", "aac", "-b:a", "160k"] if has_audio else ["-an"])
-    ffmpeg(["-i", str(src.resolve()), "-filter_complex_script", script.name, *maps,
+    ffmpeg([*inputs, "-filter_complex_script", script.name, *maps,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart", out.name], cwd=out.parent)
+
+
+FONT_CANDIDATES = [
+    os.environ.get("CA_CAPTION_FONT_FILE", ""),
+    "/System/Library/Fonts/Supplemental/Arial Black.ttf",  # macOS
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/Library/Fonts/Arial Bold.ttf",
+    "C:/Windows/Fonts/ariblk.ttf",
+    "/usr/share/fonts/opentype/inter/Inter-Black.otf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+]
+
+
+def _font(size: int):
+    from PIL import ImageFont
+
+    for path in FONT_CANDIDATES:
+        if path and Path(path).exists():
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default(size=size)
+
+
+def _wrap(draw, words: list[str], font, max_w: int) -> list[list[str]]:
+    lines: list[list[str]] = [[]]
+    for word in words:
+        trial = " ".join(lines[-1] + [word])
+        if lines[-1] and draw.textlength(trial, font=font) > max_w:
+            lines.append([word])
+        else:
+            lines[-1].append(word)
+    return lines
+
+
+def _draw_frame(card: Card | None, hook: str | None, path: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGBA", (OUT_W, OUT_H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    if hook:
+        font = _font(68)
+        y = 250
+        for line in _wrap(draw, hook.split(), font, OUT_W - 260):
+            text = " ".join(line)
+            w = draw.textlength(text, font=font)
+            x = (OUT_W - w) / 2
+            draw.rectangle((x - 22, y - 14, x + w + 22, y + 82), fill=(255, 215, 0, 255))
+            draw.text((x, y), text, font=font, fill=(20, 20, 20, 255))
+            y += 92
+    if card:
+        font = _font(96)
+        words = card.text.upper().split()
+        key = max(range(len(words)), key=lambda i: len(re.sub(r"\W", "", words[i])))
+        lines = _wrap(draw, words, font, OUT_W - 160)
+        y = OUT_H - 560 - 112 * len(lines)
+        index = 0
+        for line in lines:
+            space = draw.textlength(" ", font=font)
+            x = (OUT_W - draw.textlength(" ".join(line), font=font)) / 2
+            for word in line:
+                color = (255, 215, 0, 255) if index == key else (255, 255, 255, 255)
+                draw.text((x, y), word, font=font, fill=color, stroke_width=7, stroke_fill=(0, 0, 0, 255))
+                x += draw.textlength(word, font=font) + space
+                index += 1
+            y += 112
+    img.save(path)
+
+
+def render_caption_frames(cards: list[Card], hook: str | None, workdir: Path,
+                          hook_seconds: float = 3.0) -> Path:
+    """Captions as a timed sequence of transparent PNGs (an ffconcat playlist)
+    for overlaying, used when ffmpeg has no libass."""
+    workdir.mkdir(parents=True, exist_ok=True)
+    cuts = sorted({0.0, *(c.start for c in cards), *(c.end for c in cards), hook_seconds if hook else 0.0})
+    entries: list[tuple[str, float]] = []
+    rendered: dict[tuple, str] = {}
+    for t0, t1 in zip(cuts, cuts[1:]):
+        if t1 - t0 < 0.01:
+            continue
+        mid = (t0 + t1) / 2
+        card = next((c for c in cards if c.start <= mid < c.end), None)
+        show_hook = hook if hook and mid < hook_seconds else None
+        key = (card.text if card else None, show_hook)
+        if key not in rendered:
+            rendered[key] = f"cap{len(rendered):04d}.png"
+            _draw_frame(card, show_hook, workdir / rendered[key])
+        entries.append((rendered[key], t1 - t0))
+    if not entries:
+        rendered[(None, None)] = "cap_blank.png"
+        _draw_frame(None, None, workdir / "cap_blank.png")
+        entries.append(("cap_blank.png", 0.1))
+    lines = ["ffconcat version 1.0"]
+    for name, duration in entries:
+        lines += [f"file '{name}'", f"duration {duration:.3f}"]
+    lines.append(f"file '{entries[-1][0]}'")  # concat demuxer needs the last file repeated
+    playlist = workdir / "captions.ffconcat"
+    playlist.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return playlist
 
 
 def thumbnail(video: Path, out: Path, at: float = 1.0) -> None:
@@ -287,17 +406,28 @@ def synthesize_footage(sentences: list[str], out: Path, workdir: Path) -> Path:
     """Fake a raw phone take: 16:9, a presenter reading the script with the
     awkward pauses real takes have (lead-in, gaps between lines, tail).
 
-    Speech comes from ffmpeg's built-in flite TTS, so the editor agent has
-    something real to cut, crop and caption without anyone filming.
+    Speech comes from ffmpeg's flite TTS, or macOS `say` on builds without
+    flite, so the editor agent has something real to cut, crop and caption
+    without anyone filming.
     """
+    filters = available_filters()
+    use_flite = "flite" in filters
+    if not use_flite and not shutil.which("say"):
+        raise MediaError("No text-to-speech available to simulate a take (needs ffmpeg with flite, "
+                         "or macOS). Use 'Upload a real clip' instead.")
     workdir.mkdir(parents=True, exist_ok=True)
     gaps = [1.2, 0.9, 1.7, 0.8, 1.4, 1.0, 1.9, 0.9, 1.3]
     lead, tail = 1.8, 2.2
     inputs, chains = [], []
     for i, sentence in enumerate(sentences):
         (workdir / f"line{i}.txt").write_text(sentence, encoding="utf-8")
-        ffmpeg(["-f", "lavfi", "-i", f"flite=textfile=line{i}.txt:voice=slt",
-                "-af", "aresample=48000,volume=2.2", "-ac", "1", f"line{i}.wav"], cwd=workdir)
+        if use_flite:
+            source = ["-f", "lavfi", "-i", f"flite=textfile=line{i}.txt:voice=slt"]
+        else:
+            subprocess.run(["say", "-o", f"line{i}.aiff", "-f", f"line{i}.txt"], cwd=workdir, check=True)
+            source = ["-i", f"line{i}.aiff"]
+        ffmpeg([*source, "-af", f"aresample=48000,volume={2.2 if use_flite else 1.0}", "-ac", "1",
+                f"line{i}.wav"], cwd=workdir)
         inputs += ["-i", f"line{i}.wav"]
         pad = tail if i == len(sentences) - 1 else gaps[i % len(gaps)]
         delay = f"adelay={int(lead * 1000)}:all=1," if i == 0 else ""
@@ -314,13 +444,16 @@ def synthesize_footage(sentences: list[str], out: Path, workdir: Path) -> Path:
     video_graph = (
         f"gradients=s=1920x1080:c0=0x1b2a41:c1=0x3b5368:c2=0x22313f:nb_colors=3:speed=0.015:d={duration}:r=30,"
         "drawbox=x=(iw-520)/2:y=210:w=520:h=870:color=0xf2c14e@0.22:t=fill,"
-        "drawbox=x=(iw-220)/2:y=260:w=220:h=220:color=0xf2c14e@0.35:t=fill,"
-        f"drawtext={font}text='SUBJECT':fontcolor=white@0.55:fontsize=30:x=(w-tw)/2:y=520,"
+        "drawbox=x=(iw-220)/2:y=260:w=220:h=220:color=0xf2c14e@0.35:t=fill"
+    )
+    if "drawtext" in filters:  # labels are decoration; slim builds skip them
+        video_graph += (
+        f",drawtext={font}text='SUBJECT':fontcolor=white@0.55:fontsize=30:x=(w-tw)/2:y=520,"
         f"drawtext={font}text='REC':fontcolor=0xff4d4d:fontsize=40:x=60:y=50,"
         f"drawtext={font}text='%{{pts\\:hms}}':fontcolor=white:fontsize=40:x=w-tw-60:y=50,"
         f"drawtext={font}text='raw 16\\:9 take':fontcolor=white@0.5:fontsize=30:x=60:y=h/2-20,"
         f"drawtext={font}text='(cropped away)':fontcolor=white@0.35:fontsize=26:x=60:y=h/2+24"
-    )
+        )
     ffmpeg(["-f", "lavfi", "-i", video_graph, "-i", "take.wav", "-map", "0:v", "-map", "1:a",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-shortest", str(out.resolve())], cwd=workdir)

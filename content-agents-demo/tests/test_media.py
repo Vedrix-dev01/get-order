@@ -57,3 +57,13 @@ def test_write_ass(tmp_path):
     assert "0:00:00.00,0:00:01.25,Caption" in text
     assert "(WORLD)" in text  # braces can't break ASS override tags
     assert "Hook,,0,0,0,," in text
+
+
+def test_caption_frames_playlist_for_builds_without_libass(tmp_path):
+    cards = [media.Card(0.0, 1.0, "first card"), media.Card(1.5, 2.5, "second")]
+    playlist = media.render_caption_frames(cards, "Hook line", tmp_path, hook_seconds=2.0)
+    lines = playlist.read_text().splitlines()
+    durations = [float(l.split()[1]) for l in lines if l.startswith("duration")]
+    assert abs(sum(durations) - 2.5) < 0.01  # covers the whole caption timeline
+    assert lines[-1] == lines[-3]  # last image repeated for the concat demuxer
+    assert len(list(tmp_path.glob("cap*.png"))) == 4  # card1+hook, hook only, card2+hook, card2

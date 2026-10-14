@@ -26,7 +26,8 @@ Each stage triggers the next automatically. You step in at three points only:
 
 ## Run it
 
-Needs Python 3.10+ and ffmpeg (with libass, standard in most builds: `brew install ffmpeg`).
+Needs Python 3.10+ and ffmpeg (`brew install ffmpeg`). Slim ffmpeg builds (like Homebrew's)
+are fine: captions fall back to Pillow and the simulated take uses macOS `say` for the voice.
 
 ```bash
 cd content-agents-demo
